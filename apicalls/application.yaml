@@ -1,0 +1,37 @@
+legacy:
+  api:
+    mappings:
+      - legacy: "/legacy/api1"
+        rationalized:
+          - url: "/rationalized/api1"
+            dependent: false
+            responseModel: "com.example.responses.Api1Response"
+            maxThreads: 3
+          - url: "/rationalized/api2"
+            dependent: true
+            dependsOn: "/rationalized/api1"
+            responseModel: "com.example.responses.Api2Response"
+            maxThreads: 1
+          - url: "/rationalized/api3"
+            dependent: false
+            responseModel: "com.example.responses.Api3Response"
+            maxThreads: 2
+          - url: "/rationalized/api4"
+            dependent: false
+            responseModel: "com.example.responses.Api4Response"
+            maxThreads: 2
+          - url: "/rationalized/api5"
+            dependent: false
+            responseModel: "com.example.responses.Api5Response"
+            maxThreads: 2
+      - legacy: "/legacy/api2"
+        rationalized:
+          - url: "/rationalized/api6"
+            dependent: false
+            responseModel: "com.example.responses.Api6Response"
+            maxThreads: 3
+          - url: "/rationalized/api7"
+            dependent: true
+            dependsOn: "/rationalized/api6"
+            responseModel: "com.example.responses.Api7Response"
+            maxThreads: 1
