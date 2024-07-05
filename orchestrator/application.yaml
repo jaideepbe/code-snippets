@@ -1,0 +1,15 @@
+legacy:
+  api:
+    mappings:
+      - legacy: "/legacy/api1"
+        rationalized:
+          - url: "/rationalized/api1"
+            dependent: false
+            responseModel: "com.example.responses.Response1"
+            maxThreads: 3
+          - url: "/rationalized/api2"
+            dependent: true
+            dependsOn: "/rationalized/api1"
+            dependencyField: "propertyA" # Field in Response1 to pass to API2
+            responseModel: "com.example.responses.Response2"
+            maxThreads: 1
