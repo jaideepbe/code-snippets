@@ -1,0 +1,355 @@
+Create FlowContext as a session-scoped @Component in com.org.infraengine.model.
+Fields:
+  - appType (enum: NEW_APP / EXISTING_APP)
+  - apiScenario (enum: NEW_API / REPROFILING)
+  - repoName (String)
+  - apis (List<ApiInput>)           // for NEW_APP or NEW_API
+  - currentTps (double)             // for REPROFILING
+  - isModified (boolean)            // for REPROFILING: was code changed?
+  - existingInfraConfig (ExistingInfraConfig)
+  - existingOpenApiYaml (String)
+  - rssObservedMb (double)
+
+Annotate with @Component @SessionScope.
+Include clear() method to reset all fields.
+
+Create FlowRouterController in com.org.infraengine.controller.
+Handles the landing/routing page.
+
+GET /: 
+  - Clear FlowContext
+  - Show templates/home.html
+
+POST /start:
+  - Accept appType selection (NEW_APP or EXISTING_APP)
+  - Store in FlowContext
+  - If NEW_APP: redirect to /flow/new-app/step1
+  - If EXISTING_APP: redirect to /flow/existing-app/step1
+
+
+
+
+Create NewAppController in com.org.infraengine.controller.flow.
+Inject FlowContext, BaselineFacade, PayloadEstimatorService.
+All views under templates/flow/new-app/.
+
+GET /flow/new-app/step1 — API count selection:
+  Show form: "How many APIs are you sizing?" (number input, min 1 max 10)
+  Also show field for: concurrency assumption (expected concurrent users)
+  View: flow/new-app/step1.html
+
+POST /flow/new-app/step1:
+  Store api count + concurrency in FlowContext
+  Initialise FlowContext.apis as empty list of that size
+  Redirect to /flow/new-app/api/0
+
+GET /flow/new-app/api/{index}:
+  Show per-API input form for API number {index+1}
+  Form fields:
+    - apiName
+    - Upload OpenAPI spec YAML file (multipart)
+    - tps for this API
+    - p95PayloadKb (optional, if known)
+    - Object type inputs section (parsed from spec + manual override):
+        For each detected schema show:
+          typeName (read-only), fieldCount (editable), 
+          isNested (checkbox), nestedDepth (number), 
+          isList (checkbox), expectedListSize (number),
+          avgFieldSizeBytes (number, default from config)
+    - Collections section: max rows per collection (list of inputs)
+  On spec upload: POST /flow/new-app/api/{index}/parse-spec
+    Parse spec, pre-fill object types section, stay on same page
+  View: flow/new-app/api-form.html
+
+POST /flow/new-app/api/{index}:
+  Save ApiInput into FlowContext.apis[index]
+  If index < total-1: redirect to /flow/new-app/api/{index+1}
+  Else: redirect to /flow/new-app/review
+
+GET /flow/new-app/review:
+  Show summary of all APIs entered with TPS, payload estimates
+  Show "Compute Sizing" button
+  View: flow/new-app/review.html
+
+POST /flow/new-app/compute:
+  Call BaselineFacade.computeMultiApiSizing(FlowContext.apis, 0)
+  Store result in FlowContext
+  Redirect to /flow/result
+
+
+
+Create ExistingAppNewApiController in com.org.infraengine.controller.flow.
+Inject FlowContext, GitHubReaderService, BaselineFacade, InfraComparisonService.
+
+GET /flow/existing-app/step1 — Choose scenario:
+  Show two options as radio buttons:
+    "Adding a new API to existing app"
+    "Reprofiling an existing API"
+  View: flow/existing-app/step1.html
+
+POST /flow/existing-app/step1:
+  Store apiScenario in FlowContext
+  Redirect to /flow/existing-app/step2
+
+GET /flow/existing-app/step2 — Repo selection:
+  Call GitHubReaderService.listRepositories()
+  Show dropdown of repos
+  View: flow/existing-app/step2.html
+
+POST /flow/existing-app/step2:
+  Store repoName in FlowContext
+  Call GitHubReaderService.readInfraConfig(repoName)
+  Store ExistingInfraConfig in FlowContext
+  If NEW_API: redirect to /flow/new-api/step1
+  If REPROFILING: redirect to /flow/reprofiling/step1
+
+--- NEW API sub-flow ---
+GET /flow/new-api/step1:
+  Show current infra summary (read from FlowContext.existingInfraConfig)
+    as read-only info card at top
+  Then show same API input form as Flow 1 (single API only)
+  View: flow/new-api/form.html
+
+POST /flow/new-api/step1:
+  Save ApiInput into FlowContext.apis
+  Redirect to /flow/new-api/compute
+
+POST /flow/new-api/compute:
+  Call BaselineFacade.computeMultiApiSizing with new API only, rss=0
+  Call InfraComparisonService.compare(existingInfraConfig, recommendation)
+  Store both in FlowContext
+  Redirect to /flow/result (result page will show comparison view for this flow)
+
+
+
+
+Create ReprofilingController in com.org.infraengine.controller.flow.
+Inject FlowContext, GitHubReaderService, BaselineFacade, InfraComparisonService.
+
+GET /flow/reprofiling/step1 — Current TPS + modification check:
+  Show:
+    - Current TPS input field
+    - RSS memory observed (optional, if known from monitoring)
+    - Radio: "Pure reprofiling (no code changes)" / "Modification done (code changed)"
+  Show existing infra as read-only card (from FlowContext.existingInfraConfig)
+  View: flow/reprofiling/step1.html
+
+POST /flow/reprofiling/step1:
+  Store currentTps, rssObservedMb, isModified in FlowContext
+  If NOT isModified: redirect to /flow/reprofiling/compute
+  If isModified: redirect to /flow/reprofiling/upload-spec
+
+GET /flow/reprofiling/upload-spec — Modified app spec upload:
+  Try to auto-read spec from GitHub using GitHubReaderService.readOpenApiSpec(repoName)
+  If found: pre-fill textarea with existing spec, label as "Current spec — edit if changed"
+  If not found: show empty upload field
+  Also show object type override inputs (same as Flow 1 API form)
+  View: flow/reprofiling/upload-spec.html
+
+POST /flow/reprofiling/upload-spec:
+  Save spec and overrides into FlowContext.apis[0]
+  Redirect to /flow/reprofiling/compute
+
+POST /flow/reprofiling/compute:
+  If NOT isModified:
+    Use existingOpenApiYaml from GitHub (read via GitHubReaderService)
+    Parse into objectTypes using PayloadEstimatorService.extractFromOpenApi
+    Build ApiInput with currentTps
+    Call BaselineFacade.computeMultiApiSizing
+  If isModified:
+    Use FlowContext.apis[0] already populated
+    Call BaselineFacade.computeMultiApiSizing with rssObservedMb from FlowContext
+  Call InfraComparisonService.compare(existingInfraConfig, recommendation)
+  Store both in FlowContext
+  Redirect to /flow/result
+
+
+
+Create ResultController in com.org.infraengine.controller.
+Inject FlowContext.
+
+GET /flow/result:
+  Model:
+    - recommendation (SizingRecommendation from FlowContext)
+    - comparison (InfraComparisonResult, may be null for Flow 1)
+    - appType, apiScenario from FlowContext
+    - apis summary list
+  View: flow/result.html
+
+flow/result.html sections (Thymeleaf, no JS):
+
+1. Header banner — flow type badge (NEW APP / NEW API / REPROFILING), 
+   repo name if applicable
+
+2. If multi-API: per-API breakdown table
+   | API Name | TPS | Worst-case Payload KB | p95 Payload KB |
+   Then: "Aggregated for extreme scenario"
+
+3. Bucket card — large centred badge: LOW / MEDIUM / HIGH / EXTREME
+   with the two inputs that drove it (total TPS, effective payload KB)
+
+4. EKS Recommendation card:
+   | Field          | Value         |
+   | CPU Request    | 500m          |
+   | CPU Limit      | 1000m         |
+   | Memory Request | 1024 Mi       |
+   | Memory Limit   | 2048 Mi       |
+   | Xms            | 1228 MB       |
+   | Xmx            | 1228 MB       |
+   | Heap            | 1228 MB       |
+   JVM Args: monospace block
+
+5. If comparison is not null (Flows 2 and 3):
+   Comparison table with colour-coded deltas
+   | Field | Current | Recommended | Change | Reason |
+   Green row = decrease (saving), Red row = increase (needed), 
+   Grey row = no change
+   Verdict banner below table
+
+6. Reasoning accordion — each reasoning step as a collapsible item
+   (CSS only using <details><summary> tags)
+
+7. Two buttons: "Start Over" (clears session, goes to /) 
+   and "Copy EKS YAML" (shows pre block with k8s snippet to copy manually)
+
+Kubernetes YAML snippet to generate (in a <pre> block):
+  resources:
+    requests:
+      cpu: {cpuRequest}
+      memory: {memoryRequestMb}Mi
+    limits:
+      cpu: {cpuLimit}
+      memory: {memoryLimitMb}Mi
+  env:
+    - name: JAVA_OPTS
+      value: "{jvmArgs}"
+
+
+
+
+
+Create templates/home.html — landing page:
+  Clean page with tool name "Infra Sizing Engine" as heading
+  Subtitle: "EKS sizing for Spring Boot services"
+  Two large option cards side by side:
+    Card 1: "New Spring Boot App"
+      Description: Size a new application with one or more APIs
+      Button: Get Started → POST /start with appType=NEW_APP
+    Card 2: "Existing Spring Boot App" 
+      Description: Add a new API or reprofile an existing one
+      Button: Get Started → POST /start with appType=EXISTING_APP
+
+Update src/main/resources/static/css/main.css:
+  Add styles for:
+  - .flow-card: large clickable card with border, hover highlight
+  - .bucket-badge: large centred badge, colours per bucket:
+      LOW=green, MEDIUM=blue, HIGH=orange, EXTREME=red
+  - .delta-table tr.increase: light red background
+  - .delta-table tr.decrease: light green background  
+  - .delta-table tr.no-change: no background
+  - .verdict-banner: full width coloured banner per verdict type
+  - details > summary: styled as collapsible accordion row
+  - .infra-current-card: grey info card showing read-only existing config
+  - .step-indicator: breadcrumb showing Step 1 / 2 / 3 at top of flow pages
+  Keep everything in system-ui font, no external dependencies
+
+
+
+github:
+  base-url: https://api.github.com
+  token: ${GITHUB_TOKEN}
+  org: ${GITHUB_ORG}
+```
+
+And `GitHubReaderService` has `listRepositories()` which calls GitHub API and returns a dropdown list.
+
+In **Prompt 12**, the repo selection step does:
+```
+GET /flow/existing-app/step2 — calls listRepositories() → dropdown
+POST /flow/existing-app/step2 — stores repoName in FlowContext → passed downstream
+```
+
+So **org and token come from config**, **repo is picked by user from UI dropdown**, and **FlowContext carries it through all subsequent steps**.
+
+---
+
+## What's Missing / Gaps
+
+Three things were not explicitly covered:
+
+---
+
+**Gap 1 — Repo not passed into GitHubReaderService calls in Flow 3**
+
+In Prompt 13, `readOpenApiSpec(repoName)` and `readInfraConfig(repoName)` are called but the controller needs to pull `repoName` from `FlowContext`. This was implied but not spelled out. Add this clarification prompt:
+```
+In ReprofilingController and ExistingAppNewApiController, 
+wherever GitHubReaderService methods are called, always pass 
+FlowContext.getRepoName() as the repoName argument.
+Never hardcode or re-ask for the repo name after step2 — 
+it lives in FlowContext for the entire session.
+```
+
+---
+
+**Gap 2 — FlowContext repoName not shown in UI after selection**
+
+Once the user picks a repo in step2, subsequent pages should confirm which repo they are working on. Add this:
+```
+In all flow pages after step2 (new-api/form.html, 
+reprofiling/step1.html, reprofiling/upload-spec.html),
+add a read-only info bar at the top showing:
+  "Repository: {repoName}  |  Org: {github.org from config}"
+Pull repoName from FlowContext in the controller and add it 
+to the model as attribute "selectedRepo" on every GET handler 
+after step2.
+```
+
+---
+
+**Gap 3 — Flow 1 (New App) has no repo concept but result page should not break**
+
+Flow 1 never sets `repoName` in FlowContext. The result page references `repoName` in the header banner. Add:
+```
+In ResultController, add repoName to model only if 
+FlowContext.getRepoName() is not null.
+In flow/result.html, wrap the repo name display with 
+th:if="${repoName != null}".
+```
+
+---
+
+## One Consolidated Prompt to Fix All Three Gaps
+```
+Fix the following gaps in the repo passing flow:
+
+1. In ReprofilingController and ExistingAppNewApiController:
+   Wherever GitHubReaderService.readInfraConfig() or 
+   readOpenApiSpec() is called, pass FlowContext.getRepoName() 
+   as the argument. Never re-prompt the user for repo name 
+   after /flow/existing-app/step2.
+
+2. In every controller GET handler that serves pages after 
+   /flow/existing-app/step2, add FlowContext.getRepoName() 
+   to the model as attribute "selectedRepo".
+   Create a Thymeleaf fragment templates/fragments/repo-bar.html:
+     <div class="repo-bar" th:if="${selectedRepo != null}">
+       Repository: <strong th:text="${selectedRepo}"></strong>
+     </div>
+   Include this fragment at the top of:
+     flow/new-api/form.html
+     flow/reprofiling/step1.html
+     flow/reprofiling/upload-spec.html
+     flow/result.html
+
+3. In ResultController:
+   Add repoName to model only when FlowContext.getRepoName() 
+   is not null. Flow 1 (new app) has no repo — result page 
+   must not fail when repoName is absent.
+
+4. Add a safety check in FlowContext:
+   If any controller tries to call GitHubReaderService 
+   but FlowContext.getRepoName() is null, throw a 
+   FlowStateException("Repo not selected — invalid flow state").
+   Handle this in GlobalExceptionHandler by redirecting 
+   to / with an error message "Session expired, please start again".
